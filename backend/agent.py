@@ -1,6 +1,5 @@
 """
-AI Agent logic: RAG (Retrieval-Augmented Generation) for Customer Support.
-Searches the knowledge base, then asks OpenAI (GPT-4o) to answer. Falls back to human support when no relevant context.
+RAG agent — multi-tenant: per-company knowledge base and GPT-4o.
 """
 
 import os
@@ -13,23 +12,17 @@ from langchain_core.runnables import RunnablePassthrough
 
 from db import get_vector_store
 
-# Model for chat (GPT-4o as requested)
 CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o")
 
 
 def _format_docs(docs):
-    """Turn retrieved documents into a single context string for the prompt."""
     return "\n\n---\n\n".join(doc.page_content for doc in docs)
 
 
-def get_rag_chain():
-    """
-    Build the RAG chain: retrieve relevant chunks from Chroma, then generate an answer with GPT-4o.
-    """
-    vector_store = get_vector_store()
-    # Retriever: get top 4 most relevant chunks
+def get_rag_chain(company_id: str):
+    """RAG chain for this company's Chroma collection."""
+    vector_store = get_vector_store(company_id)
     retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a helpful customer support agent. Answer ONLY based on the following context from the company knowledge base. Be concise and professional.
 
@@ -39,14 +32,11 @@ Context:
 {context}"""),
         ("human", "{question}"),
     ])
-
     llm = ChatOpenAI(
         model=CHAT_MODEL,
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0.3,
     )
-
-    # Chain: retrieve -> format context -> prompt -> LLM -> string
     chain = (
         {"context": retriever | _format_docs, "question": RunnablePassthrough()}
         | prompt
@@ -56,13 +46,10 @@ Context:
     return chain
 
 
-def get_rag_chain_streaming():
-    """
-    Same as get_rag_chain but returns a chain that streams tokens (for real-time UI).
-    """
-    vector_store = get_vector_store()
+def get_rag_chain_streaming(company_id: str):
+    """Streaming RAG chain for this company."""
+    vector_store = get_vector_store(company_id)
     retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a helpful customer support agent. Answer ONLY based on the following context from the company knowledge base. Be concise and professional.
 
@@ -72,14 +59,12 @@ Context:
 {context}"""),
         ("human", "{question}"),
     ])
-
     llm = ChatOpenAI(
         model=CHAT_MODEL,
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0.3,
         streaming=True,
     )
-
     chain = (
         {"context": retriever | _format_docs, "question": RunnablePassthrough()}
         | prompt
@@ -89,18 +74,14 @@ Context:
     return chain
 
 
-async def chat_stream(message: str) -> AsyncGenerator[str, None]:
-    """
-    Stream the AI response token by token for real-time chat.
-    """
-    chain = get_rag_chain_streaming()
+async def chat_stream(company_id: str, message: str) -> AsyncGenerator[str, None]:
+    """Stream AI response for the company."""
+    chain = get_rag_chain_streaming(company_id)
     async for chunk in chain.astream(message):
         yield chunk
 
 
-def chat(message: str) -> str:
-    """
-    Non-streaming chat: get full response in one go.
-    """
-    chain = get_rag_chain()
+def chat(company_id: str, message: str) -> str:
+    """Non-streaming chat for the company."""
+    chain = get_rag_chain(company_id)
     return chain.invoke(message)

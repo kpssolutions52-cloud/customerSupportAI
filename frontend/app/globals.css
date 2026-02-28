@@ -7,9 +7,31 @@
   --surface-muted: 220 14% 12%;
   --accent: 199 89% 48%;
   --border: 220 14% 22%;
+  /* ShadCN-style tokens */
+  --background: 220 18% 8%;
+  --foreground: 220 14% 96%;
+  --card: 220 14% 12%;
+  --card-foreground: 220 14% 96%;
+  --primary: 199 89% 48%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 14% 18%;
+  --secondary-foreground: 220 14% 96%;
+  --muted: 220 14% 18%;
+  --muted-foreground: 220 14% 65%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+  --input: 220 14% 22%;
+  --ring: 199 89% 48%;
 }
 
 body {
-  color: hsl(220 14% 96%);
-  background: hsl(var(--surface));
+  color: hsl(var(--foreground));
+  background: hsl(var(--background));
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
 }
