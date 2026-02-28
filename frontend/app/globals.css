@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: 220 18% 8%;
+  --surface-muted: 220 14% 12%;
+  --accent: 199 89% 48%;
+  --border: 220 14% 22%;
+}
+
+body {
+  color: hsl(220 14% 96%);
+  background: hsl(var(--surface));
+}

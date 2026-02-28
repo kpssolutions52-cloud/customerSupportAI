@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+env/
+
+# Build / runtime
+.next/
+out/
+chroma_db/
+*.pyc
+__pycache__/
+.env
+.env.local
+.env*.local
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
