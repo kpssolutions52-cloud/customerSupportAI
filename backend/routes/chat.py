@@ -1,24 +1,30 @@
 """
 Chat route: POST /chat
-Uses company context (JWT or API key), RAG, and streams response.
+Multi-tenant: each tenant is isolated by tenant_id + API key / JWT.
+
+Input (body):
+- tenant_id
+- message
+
+Security:
+- Tenant API key via X-API-Key header (or JWT for dashboard users).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
-
-from auth import CompanyFromAuth
-from database import get_db
 from sqlalchemy.orm import Session
-from fastapi import Depends
-from models import ChatLog
 
+from auth import TenantFromAuth
+from database import get_db
+from models import ChatLog
 from agent import chat_stream as agent_chat_stream, chat as agent_chat
 
 router = APIRouter(tags=["chat"])
 
 
 class ChatRequest(BaseModel):
+    tenant_id: str
     message: str
 
 
@@ -29,27 +35,28 @@ class ChatResponse(BaseModel):
 @router.post("/chat")
 async def chat_stream_endpoint(
     request: ChatRequest,
-    company: CompanyFromAuth,
+    tenant: TenantFromAuth,
     db: Session = Depends(get_db),
 ):
     """
-    Chat with the company's AI agent. Streams response (SSE).
-    Authenticate with Bearer token (dashboard) or X-API-Key (API).
+    Chat with the tenant's AI agent. Streams response (SSE).
+    We verify tenant_id in the body matches the authenticated tenant.
     """
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if str(tenant.id) != request.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant_id does not match credentials")
 
     async def event_generator():
-        full_response = []
+        full_response: list[str] = []
         try:
-            async for chunk in agent_chat_stream(company.id, request.message):
+            async for chunk in agent_chat_stream(request.tenant_id, request.message, db=db):
                 if chunk:
                     full_response.append(chunk)
                     yield {"data": chunk}
-            # Log to chat_logs after stream completes
             full = "".join(full_response)
             log = ChatLog(
-                company_id=company.id,
+                tenant_id=request.tenant_id,
                 message=request.message,
                 response=full,
             )
@@ -64,7 +71,7 @@ async def chat_stream_endpoint(
 @router.post("/chat/completion", response_model=ChatResponse)
 def chat_completion_endpoint(
     request: ChatRequest,
-    company: CompanyFromAuth,
+    tenant: TenantFromAuth,
     db: Session = Depends(get_db),
 ):
     """
@@ -73,10 +80,12 @@ def chat_completion_endpoint(
     """
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if str(tenant.id) != request.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant_id does not match credentials")
     try:
-        response = agent_chat(company.id, request.message)
+        response = agent_chat(request.tenant_id, request.message, db=db)
         log = ChatLog(
-            company_id=company.id,
+            tenant_id=request.tenant_id,
             message=request.message,
             response=response,
         )

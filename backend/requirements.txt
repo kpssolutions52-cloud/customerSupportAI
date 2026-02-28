@@ -8,6 +8,9 @@ python-dotenv>=1.0.0
 psycopg2-binary>=2.9.9
 sqlalchemy>=2.0.0
 
+# HTTP client for integrations
+requests>=2.32.0
+
 # Auth
 passlib[bcrypt]>=1.7.4
 python-jose[cryptography]>=3.3.0

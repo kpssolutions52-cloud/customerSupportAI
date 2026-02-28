@@ -1,6 +1,9 @@
 """
-SQLAlchemy models for multi-tenant Customer Support AI.
-Tables: users, companies, documents, chat_logs.
+Multi-tenant middleware platform — database models.
+
+We store ONLY:
+- tenants, users, integration configs, knowledge_documents (file_path), chat_logs.
+We do NOT store client business data (orders, customers, invoices); that stays in client systems.
 """
 
 from datetime import datetime
@@ -18,78 +21,93 @@ def generate_uuid():
     return str(uuid4())
 
 
-class Company(Base):
+class Tenant(Base):
     """
-    Tenant: each company has its own knowledge base and API key.
+    Tenant (customer of this middleware platform).
+    Each tenant has isolated: knowledge base, integrations, chat logs.
     """
-    __tablename__ = "companies"
+    __tablename__ = "tenants"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     name = Column(String(255), nullable=False, index=True)
     api_key = Column(String(64), unique=True, nullable=False, index=True)
-
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    users = relationship("User", back_populates="company")
-    documents = relationship("Document", back_populates="company")
-    chat_logs = relationship("ChatLog", back_populates="company")
+    users = relationship("User", back_populates="tenant")
+    integrations = relationship("Integration", back_populates="tenant")
+    knowledge_documents = relationship("KnowledgeDocument", back_populates="tenant")
+    chat_logs = relationship("ChatLog", back_populates="tenant")
 
     def __repr__(self):
-        return f"<Company {self.name}>"
+        return f"<Tenant {self.name}>"
 
 
 class User(Base):
-    """
-    User belongs to a company. Used for login and dashboard access.
-    """
+    """User belongs to a tenant. Used for login and dashboard access."""
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     email = Column(String(255), nullable=False, unique=True, index=True)
     password = Column(String(255), nullable=False)  # hashed
-    company_id = Column(UUID(as_uuid=False), ForeignKey("companies.id"), nullable=False)
-
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    company = relationship("Company", back_populates="users")
+    tenant = relationship("Tenant", back_populates="users")
 
     def __repr__(self):
         return f"<User {self.email}>"
 
 
-class Document(Base):
+class Integration(Base):
     """
-    Raw document content per company (also stored in Chroma as chunks).
-    Keeps a record in PostgreSQL for audit and re-ingestion.
+    Tenant's connection to their client system (CRM, orders API, custom API).
+    We store only config (base_url, api_key, auth_type) — NOT client data.
     """
-    __tablename__ = "documents"
+    __tablename__ = "integrations"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    company_id = Column(UUID(as_uuid=False), ForeignKey("companies.id"), nullable=False)
-    content = Column(Text, nullable=False)
-
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    type = Column(String(64), nullable=False)  # e.g. "crm", "orders", "custom_api"
+    base_url = Column(String(2048), nullable=False)
+    api_key = Column(String(512), nullable=True)  # or token; encrypted in production
+    auth_type = Column(String(64), nullable=True)  # e.g. "bearer", "api_key", "basic"
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    company = relationship("Company", back_populates="documents")
+    tenant = relationship("Tenant", back_populates="integrations")
 
     def __repr__(self):
-        return f"<Document {self.id[:8]}...>"
+        return f"<Integration {self.type} {self.base_url}>"
+
+
+class KnowledgeDocument(Base):
+    """
+    Metadata for ingested knowledge base documents per tenant.
+    Actual content is embedded in Chroma only; we do not store document body here.
+    """
+    __tablename__ = "knowledge_documents"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    file_path = Column(String(1024), nullable=False)  # reference only; content in Chroma
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="knowledge_documents")
+
+    def __repr__(self):
+        return f"<KnowledgeDocument {self.file_path}>"
 
 
 class ChatLog(Base):
-    """
-    Log of chat messages and AI responses per company (for usage and history).
-    """
+    """Chat history per tenant (message + AI response). No client business data."""
     __tablename__ = "chat_logs"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    company_id = Column(UUID(as_uuid=False), ForeignKey("companies.id"), nullable=False)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
     message = Column(Text, nullable=False)
     response = Column(Text, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    company = relationship("Company", back_populates="chat_logs")
+    tenant = relationship("Tenant", back_populates="chat_logs")
 
     def __repr__(self):
         return f"<ChatLog {self.id[:8]}...>"

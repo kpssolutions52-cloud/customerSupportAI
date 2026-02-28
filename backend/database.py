@@ -31,7 +31,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     """Create all tables. Call on app startup (after importing models)."""
-    from models import Company, User, Document, ChatLog  # noqa: F401 - register models
+    from models import Tenant, User, Integration, KnowledgeDocument, ChatLog  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
 

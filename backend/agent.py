@@ -1,9 +1,19 @@
 """
-RAG agent — multi-tenant: per-company knowledge base and GPT-4o.
+AI agent — middleware flow: tenant KB + optional client API + OpenAI.
+
+Flow:
+1. Receive message, get tenant_id
+2. Search tenant knowledge base (Chroma)
+3. Detect if external data needed (e.g. order, customer) — if yes, call client API
+4. Combine context (KB + client API response)
+5. Send to OpenAI, return response
+
+We do NOT store client business data; we only pass API responses through to the model.
 """
 
 import os
-from typing import AsyncGenerator
+import re
+from typing import AsyncGenerator, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -11,6 +21,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
 from db import get_vector_store
+from integrations.client_api import call_client_api
 
 CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o")
 
@@ -19,69 +30,94 @@ def _format_docs(docs):
     return "\n\n---\n\n".join(doc.page_content for doc in docs)
 
 
-def get_rag_chain(company_id: str):
-    """RAG chain for this company's Chroma collection."""
-    vector_store = get_vector_store(company_id)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a helpful customer support agent. Answer ONLY based on the following context from the company knowledge base. Be concise and professional.
+def _get_kb_context(tenant_id: str, message: str, k: int = 4) -> str:
+    """Retrieve relevant chunks from tenant's knowledge base."""
+    try:
+        store = get_vector_store(tenant_id)
+        docs = store.similarity_search(message, k=k)
+        return _format_docs(docs) if docs else ""
+    except Exception:
+        return ""
 
-If the context does not contain enough information to answer the question, respond with exactly: "I will connect you to human support."
 
-Context:
-{context}"""),
-        ("human", "{question}"),
-    ])
-    llm = ChatOpenAI(
+def _detect_and_fetch_client_data(tenant_id: str, message: str, db=None) -> str:
+    """
+    Detect if the message asks for live data (order, customer, etc.) and call client API.
+    Returns a string to add to context (or empty). We do NOT store this data.
+    """
+    message_lower = message.lower()
+    # Simple heuristic: look for "order" + number or "order #", "customer", "invoice"
+    order_match = re.search(r"order\s*(?:#|number|id)?\s*[:\s]*(\d+)", message_lower, re.I)
+    if order_match:
+        order_id = order_match.group(1)
+        result = call_client_api(tenant_id, f"/orders/{order_id}", "GET", db=db)
+        if result.get("ok") and result.get("body"):
+            return f"\n\n[Client system response for order {order_id}]:\n{result['body']}\n"
+        if result.get("error"):
+            return f"\n\n[Client system unavailable: {result['error']}]\n"
+
+    if "customer" in message_lower or "my account" in message_lower:
+        # Optional: extract customer id or use a generic /me or /customers endpoint
+        result = call_client_api(tenant_id, "/customers/me", "GET", db=db)
+        if result.get("ok") and result.get("body"):
+            return f"\n\n[Client system response]:\n{result['body']}\n"
+        if result.get("error"):
+            return f"\n\n[Client system unavailable: {result['error']}]\n"
+
+    return ""
+
+
+def _build_system_prompt(kb_context: str, client_context: str) -> str:
+    """Build system prompt from KB + optional client API context."""
+    parts = [
+        "You are a helpful customer support agent. Answer based on the following context.",
+        "Be concise and professional.",
+    ]
+    if kb_context:
+        parts.append("\nKnowledge base:\n" + kb_context)
+    if client_context:
+        parts.append("\nLive data from client system (use this to answer):\n" + client_context)
+    parts.append(
+        '\nIf the context does not contain enough information, say: "I will connect you to human support."'
+    )
+    return "\n".join(parts)
+
+
+def _get_llm(streaming: bool = False):
+    return ChatOpenAI(
         model=CHAT_MODEL,
         api_key=os.getenv("OPENAI_API_KEY"),
         temperature=0.3,
+        streaming=streaming,
     )
-    chain = (
-        {"context": retriever | _format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    return chain
 
 
-def get_rag_chain_streaming(company_id: str):
-    """Streaming RAG chain for this company."""
-    vector_store = get_vector_store(company_id)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
+def chat(tenant_id: str, message: str, db=None) -> str:
+    """
+    Non-streaming: get tenant KB context, optionally call client API, then OpenAI.
+    """
+    kb_context = _get_kb_context(tenant_id, message)
+    client_context = _detect_and_fetch_client_data(tenant_id, message, db=db)
+    system = _build_system_prompt(kb_context, client_context)
+    llm = _get_llm(streaming=False)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a helpful customer support agent. Answer ONLY based on the following context from the company knowledge base. Be concise and professional.
-
-If the context does not contain enough information to answer the question, respond with exactly: "I will connect you to human support."
-
-Context:
-{context}"""),
+        ("system", system),
         ("human", "{question}"),
     ])
-    llm = ChatOpenAI(
-        model=CHAT_MODEL,
-        api_key=os.getenv("OPENAI_API_KEY"),
-        temperature=0.3,
-        streaming=True,
-    )
-    chain = (
-        {"context": retriever | _format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    return chain
+    chain = prompt | llm | StrOutputParser()
+    return chain.invoke({"question": message})
 
 
-async def chat_stream(company_id: str, message: str) -> AsyncGenerator[str, None]:
-    """Stream AI response for the company."""
-    chain = get_rag_chain_streaming(company_id)
-    async for chunk in chain.astream(message):
+async def chat_stream(tenant_id: str, message: str, db=None) -> AsyncGenerator[str, None]:
+    """Streaming: same flow, tokens streamed."""
+    kb_context = _get_kb_context(tenant_id, message)
+    client_context = _detect_and_fetch_client_data(tenant_id, message, db=db)
+    system = _build_system_prompt(kb_context, client_context)
+    llm = _get_llm(streaming=True)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "{question}"),
+    ])
+    chain = prompt | llm | StrOutputParser()
+    async for chunk in chain.astream({"question": message}):
         yield chunk
-
-
-def chat(company_id: str, message: str) -> str:
-    """Non-streaming chat for the company."""
-    chain = get_rag_chain(company_id)
-    return chain.invoke(message)
