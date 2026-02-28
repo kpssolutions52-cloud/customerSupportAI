@@ -1,67 +1,84 @@
 """
-Upload route: POST /upload
-Upload knowledge base documents for the company (requires JWT).
+Knowledge base upload route: POST /upload
+
+Input (multipart/form-data):
+- tenant_id (form field)
+- file (file field)
+
+Flow:
+1. Save file under DATA_DIR/{tenant_id}/documents/
+2. Call ingest_document(file_path, tenant_id) to store embeddings in Chroma (tenant_{tenant_id})
+3. Record KnowledgeDocument metadata (file_path) — no raw business data in DB
 """
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+import os
+from pathlib import Path
 
-from auth import CurrentUser
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from sqlalchemy.orm import Session
+
+from auth import TenantFromAuth
 from database import get_db
-from models import Document
-from db import add_documents_to_kb
+from models import KnowledgeDocument
+from knowledge.ingest import ingest_document
 
 router = APIRouter(tags=["upload"])
 
 
 @router.post("/upload")
-def upload_documents(
+async def upload_document(
+    tenant_id: str = Form(...),
     file: UploadFile = File(...),
-    user: CurrentUser = ...,
+    tenant: TenantFromAuth = Depends(),
     db: Session = Depends(get_db),
 ):
     """
-    Upload a text file; content is split into chunks and added to the company's
-    Chroma knowledge base. Also stored in PostgreSQL (documents table).
-    Requires Bearer token (logged-in user).
+    Upload a document for a tenant's knowledge base.
+
+    Security:
+    - Tenant is resolved from X-API-Key or JWT.
+    - tenant_id form field must match authenticated tenant.id.
     """
-    company_id = user.company_id
-    if not file.filename or not file.filename.lower().endswith((".txt", ".md", ".csv")):
-        raise HTTPException(
-            status_code=400,
-            detail="Upload a .txt, .md, or .csv file",
-        )
-    content = file.file.read()
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="File must be UTF-8 text")
-    if not text.strip():
+    if str(tenant.id) != tenant_id:
+        raise HTTPException(status_code=403, detail="tenant_id does not match credentials")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is required")
+
+    # Save file under DATA_DIR/{tenant_id}/documents/
+    data_root = os.getenv("DATA_DIR", "./data")
+    docs_dir = Path(data_root) / tenant_id / "documents"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = Path(file.filename).name  # avoid directory traversal
+    dest_path = docs_dir / safe_name
+
+    content = await file.read()
+    if not content:
         raise HTTPException(status_code=400, detail="File is empty")
-    # Store in PostgreSQL
-    doc = Document(company_id=company_id, content=text)
+
+    with dest_path.open("wb") as f:
+        f.write(content)
+
+    # Ingest into Chroma (per-tenant collection)
+    try:
+        chunks_added = ingest_document(str(dest_path), tenant_id)
+    except ValueError as e:
+        # Unsupported file type or loader error
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
+
+    # Record metadata only (file_path), not raw content
+    doc = KnowledgeDocument(tenant_id=tenant_id, file_path=str(dest_path))
     db.add(doc)
     db.commit()
-    # Add to Chroma (chunk and embed)
-    count = add_documents_to_kb(company_id, [text])
-    return {"status": "ok", "chunks_added": count, "document_id": doc.id}
+    db.refresh(doc)
 
-
-@router.post("/upload/text")
-def upload_text(
-    body: dict,
-    user: CurrentUser = ...,
-    db: Session = Depends(get_db),
-):
-    """
-    Add knowledge base content via JSON body: { "text": "..." }.
-    Same as file upload but for programmatic use.
-    """
-    company_id = user.company_id
-    text = body.get("text") or body.get("content") or ""
-    if not isinstance(text, str) or not text.strip():
-        raise HTTPException(status_code=400, detail="Provide 'text' or 'content'")
-    doc = Document(company_id=company_id, content=text)
-    db.add(doc)
-    db.commit()
-    count = add_documents_to_kb(company_id, [text])
-    return {"status": "ok", "chunks_added": count, "document_id": doc.id}
+    return {
+        "status": "ok",
+        "tenant_id": tenant_id,
+        "file_path": str(dest_path),
+        "chunks_added": chunks_added,
+        "document_id": doc.id,
+    }

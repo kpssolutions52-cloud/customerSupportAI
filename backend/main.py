@@ -20,7 +20,8 @@ load_dotenv()
 async def lifespan(app: FastAPI):
     """Create DB tables and Chroma dir on startup."""
     init_db()
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+    # Default vector DB path: ./data/vector_db (matches /data/vector_db in containers)
+    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/vector_db")
     os.makedirs(persist_dir, exist_ok=True)
     yield
 

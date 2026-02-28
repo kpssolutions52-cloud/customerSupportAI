@@ -11,7 +11,10 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+# Legacy helper module for vector store access.
+# New code should prefer backend/knowledge/ingest.py and search.py.
+
+PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/vector_db")
 
 
 def get_embeddings():
